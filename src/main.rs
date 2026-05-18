@@ -9,9 +9,9 @@ mod runlog;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -19,25 +19,20 @@ use crate::cache::ChunkCache;
 use crate::chunker::{chunk_rust_source, ChunkConfig};
 use crate::ollama::OllamaClient;
 use crate::prompt::{build_analysis_prompt, build_commenting_prompt, PromptProfile};
-use crate::report::{write_markdown_report, AnalysisItem};
+use crate::report::AnalysisItem;
 use crate::rewrite::{build_rewritten_source, rustfmt_file_if_available, validate_generated_chunk};
 use crate::runlog::{ChunkRunStatus, RunLog};
 
-// ---------------------------------------------------------------------------
-// CLI types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
 enum Mode {
-    /// Analyze chunks and write a Markdown report.
+    /// Analyze chunks and write plain text output.
     Analyze,
-    /// Ask the model to return commented code chunks and save them in a report.
+    /// Ask the model to return commented code chunks and offer to apply them in place.
     Comment,
-    /// Ask the model to return commented code chunks and write a new commented source file.
+    /// Ask the model to return commented code chunks and offer to apply them in place.
     Rewrite,
 }
 
-/// Structured log level selectable from the CLI.
 #[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
 enum LogLevel {
     Error,
@@ -71,12 +66,12 @@ struct Cli {
     #[arg(long, default_value_t = 3500)]
     target_chars: usize,
 
-    /// Output file. Markdown for analyze/comment mode. Rust source for rewrite mode.
-    #[arg(short, long, default_value = "paladin-analysis.md")]
+    /// Output file used by analyze mode.
+    #[arg(short, long, default_value = "paladin-analysis.txt")]
     output: PathBuf,
 
     /// Processing mode.
-    #[arg(long, value_enum, default_value_t = Mode::Analyze)]
+    #[arg(long, value_enum, default_value_t = Mode::Comment)]
     mode: Mode,
 
     /// Prompt profile.
@@ -124,7 +119,7 @@ struct Cli {
     #[arg(long, default_value_t = 8192)]
     num_ctx: u32,
 
-    /// Run rustfmt after rewrite mode if rustfmt is installed.
+    /// Run rustfmt after applying comments if rustfmt is installed.
     #[arg(long, default_value_t = true)]
     rustfmt: bool,
 
@@ -143,14 +138,9 @@ struct Cli {
     /// Suppress all output except errors (shorthand for --log-level error).
     #[arg(long)]
     quiet: bool,
-
-    /// Show a progress bar during chunk processing.
-    #[arg(long)]
-    progress: bool,
 }
 
 impl Cli {
-    /// Validate CLI arguments before heavy work begins.
     fn validate(&self) -> Result<()> {
         if self.max_chars < 1000 {
             anyhow::bail!("--max-chars must be at least 1000 (got {})", self.max_chars);
@@ -195,10 +185,6 @@ impl Cli {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Logging setup
-// ---------------------------------------------------------------------------
-
 fn setup_logging(level: tracing::Level) {
     use tracing_subscriber::fmt;
     let builder = fmt::Subscriber::builder()
@@ -209,21 +195,18 @@ fn setup_logging(level: tracing::Level) {
         .expect("failed to set tracing subscriber");
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
-    // Set up structured logging first so that validation errors are visible.
     setup_logging(cli.effective_log_level());
-
     cli.validate()?;
 
     let started = Instant::now();
-
-    info!(file = %cli.file.display(), model = %cli.model, mode = %cli.mode_string(), "Starting paladin-commenter");
+    info!(
+        file = %cli.file.display(),
+        model = %cli.model,
+        mode = %cli.mode_string(),
+        "Starting paladin-commenter"
+    );
 
     let source = fs::read_to_string(&cli.file)
         .with_context(|| format!("failed to read file: {}", cli.file.display()))?;
@@ -234,7 +217,6 @@ fn main() -> Result<()> {
     };
 
     let chunks = chunk_rust_source(&source, config).context("failed to chunk Rust source")?;
-
     info!(chunks = chunks.len(), "File chunked successfully");
 
     for chunk in &chunks {
@@ -248,7 +230,6 @@ fn main() -> Result<()> {
     }
 
     if cli.dry_run {
-        // In dry-run, always print chunk list to stdout regardless of log level
         for chunk in &chunks {
             println!(
                 "  #{:03} {:>20} lines {}-{} chars={} bytes={}..{}",
@@ -261,11 +242,10 @@ fn main() -> Result<()> {
                 chunk.end_byte
             );
         }
-        info!("Dry run enabled — Ollama was not called.");
+        info!("Dry run enabled - Ollama was not called.");
         return Ok(());
     }
 
-    // ----- Ollama client -----
     let client = OllamaClient::new(
         cli.ollama_url.clone(),
         cli.model.clone(),
@@ -282,46 +262,27 @@ fn main() -> Result<()> {
                 models.join(", ")
             );
         }
-        info!(model = %cli.model, "Ollama reachable — model found");
+        info!(model = %cli.model, "Ollama reachable - model found");
     }
 
-    // ----- Cache -----
     let cache = if cli.cache {
         Some(ChunkCache::new(cli.cache_dir.clone(), cli.cache_ttl_duration())?)
     } else {
         None
     };
 
-    // ----- Processing loop -----
     let mut run_log = RunLog::new(&cli.file, &cli.model, &cli.mode_string(), chunks.len());
     let mut report_items = Vec::new();
     let mut replacements = Vec::new();
 
-    // Optional progress bar
-    let pb = if cli.progress {
-        let bar = ProgressBar::new(chunks.len() as u64);
-        bar.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} chunks ({eta} remaining)")
-                .expect("invalid progress bar template")
-                .progress_chars("█▓░"),
-        );
-        Some(bar)
-    } else {
-        None
-    };
-
     for chunk in chunks.iter() {
-        // Chunk filtering
         if let Some(only) = cli.only_chunk {
             if chunk.index != only {
-                if let Some(ref pb) = pb { pb.inc(1); }
                 continue;
             }
         }
         if let Some(from) = cli.from_chunk {
             if chunk.index < from {
-                if let Some(ref pb) = pb { pb.inc(1); }
                 continue;
             }
         }
@@ -340,7 +301,7 @@ fn main() -> Result<()> {
             "Processing chunk"
         );
 
-        let response_result = get_or_generate(
+        match get_or_generate(
             &client,
             cache.as_ref(),
             &cli.model,
@@ -349,18 +310,15 @@ fn main() -> Result<()> {
             &chunk.text,
             &prompt,
             cli.max_retries,
-        );
-
-        match response_result {
+        ) {
             Ok(response) => {
-                if cli.mode == Mode::Rewrite {
+                if matches!(cli.mode, Mode::Comment | Mode::Rewrite) {
                     let validation = validate_generated_chunk(&response, &chunk.text);
                     if let Err(err) = validation {
                         let msg = format!("generated chunk failed validation: {err}");
                         run_log.push_chunk(ChunkRunStatus::failed(chunk, &msg, chunk_started.elapsed()));
                         if cli.skip_failed {
                             warn!(chunk = chunk.index, error = %msg, "Keeping original chunk");
-                            if let Some(ref pb) = pb { pb.inc(1); }
                             continue;
                         }
                         anyhow::bail!("chunk #{}: {}", chunk.index, msg);
@@ -391,31 +349,34 @@ fn main() -> Result<()> {
                 if !cli.skip_failed {
                     run_log.finish(started.elapsed());
                     run_log.write(&cli.run_log)?;
-                    anyhow::bail!("stopped because chunk #{} failed. Use --skip-failed to continue.", chunk.index);
+                    anyhow::bail!(
+                        "stopped because chunk #{} failed. Use --skip-failed to continue.",
+                        chunk.index
+                    );
                 }
             }
         }
-
-        if let Some(ref pb) = pb { pb.inc(1); }
     }
 
-    if let Some(ref pb) = pb { pb.finish_with_message("Done"); }
-
-    // ----- Output -----
     match cli.mode {
-        Mode::Analyze | Mode::Comment => {
-            write_markdown_report(&cli.output, &cli.file, &report_items)
-                .with_context(|| format!("failed to write report: {}", cli.output.display()))?;
-            info!(path = %cli.output.display(), "Report written");
+        Mode::Analyze => {
+            let analysis_output = format_analysis_output(&cli.file, &report_items);
+            fs::write(&cli.output, analysis_output)
+                .with_context(|| format!("failed to write analysis output: {}", cli.output.display()))?;
+            info!(path = %cli.output.display(), "Analysis written");
         }
-        Mode::Rewrite => {
+        Mode::Comment | Mode::Rewrite => {
             let rewritten = build_rewritten_source(&source, &replacements);
-            fs::write(&cli.output, rewritten)
-                .with_context(|| format!("failed to write rewritten file: {}", cli.output.display()))?;
-            if cli.rustfmt {
-                rustfmt_file_if_available(&cli.output);
+            if prompt_apply_changes(&cli.file)? {
+                fs::write(&cli.file, rewritten)
+                    .with_context(|| format!("failed to update file: {}", cli.file.display()))?;
+                if cli.rustfmt {
+                    rustfmt_file_if_available(&cli.file);
+                }
+                info!(path = %cli.file.display(), "Changes applied");
+            } else {
+                info!(path = %cli.file.display(), "Changes discarded");
             }
-            info!(path = %cli.output.display(), "Rewritten file written");
         }
     }
 
@@ -430,9 +391,38 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Cache-aware generation with retries
-// ---------------------------------------------------------------------------
+fn format_analysis_output(input_file: &Path, items: &[AnalysisItem]) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("Input file: {}\n", input_file.display()));
+    output.push_str(&format!("Total processed chunks: {}\n\n", items.len()));
+
+    for item in items {
+        output.push_str(&format!(
+            "Chunk #{:03} [{}] lines {}-{}\n",
+            item.index, item.kind, item.start_line, item.end_line
+        ));
+        output.push_str("Source preview:\n");
+        output.push_str(&item.source_preview);
+        output.push_str("\n\nModel response:\n");
+        output.push_str(&item.model_response);
+        output.push_str("\n\n");
+    }
+
+    output
+}
+
+fn prompt_apply_changes(path: &Path) -> Result<bool> {
+    print!("Apply generated comments to {}? [y/N]: ", path.display());
+    io::stdout().flush().context("failed to flush prompt")?;
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("failed to read confirmation")?;
+
+    let normalized = input.trim().to_ascii_lowercase();
+    Ok(matches!(normalized.as_str(), "y" | "yes"))
+}
 
 fn get_or_generate(
     client: &OllamaClient,
