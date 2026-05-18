@@ -7,8 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// On-disk per-chunk response cache.
 ///
-/// Each entry is a small JSON file keyed by a composite SHA-256 of
+/// Stores computed responses keyed by a composite SHA-256 hash of
 /// (model, mode, chunk_index, chunk_content_hash, prompt_hash).
+/// This ensures that the response is deterministic based on all inputs.
 /// An optional TTL causes stale entries to be treated as cache misses.
 #[derive(Debug, Clone)]
 pub struct ChunkCache {
@@ -24,13 +25,16 @@ struct CacheEntry {
     chunk_hash: String,
     prompt_hash: String,
     response: String,
-    /// Seconds since UNIX epoch when the entry was written.
+    /// Seconds since UNIX epoch when the entry was written. Used for TTL checks.
     created_at_epoch: u64,
 }
 
 impl ChunkCache {
     /// Create (or open) a chunk cache rooted at `dir`.
     /// If `ttl` is `Some`, entries older than the duration are ignored.
+    ///
+    /// This function ensures the cache directory exists, failing if permissions
+    /// or disk space prevent creation.
     pub fn new(dir: PathBuf, ttl: Option<Duration>) -> Result<Self> {
         fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create cache dir: {}", dir.display()))?;
@@ -38,6 +42,9 @@ impl ChunkCache {
     }
 
     /// Try to load a cached response.  Returns `None` on miss or expired entry.
+    ///
+    /// The cache key is derived from all input parameters (model, mode, chunk_text, prompt).
+    /// If the file exists but the content is stale (due to TTL), it is treated as a miss.
     pub fn get(
         &self,
         model: &str,
@@ -62,6 +69,7 @@ impl ChunkCache {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            // If the time elapsed since creation exceeds the TTL, treat it as expired (cache miss).
             if now_epoch.saturating_sub(entry.created_at_epoch) > ttl.as_secs() {
                 return Ok(None);
             }
@@ -71,6 +79,9 @@ impl ChunkCache {
     }
 
     /// Persist a model response into the cache.
+    ///
+    /// The cache key is derived from all input parameters. If a key already exists,
+    /// it will be overwritten, effectively updating the cache entry.
     pub fn put(
         &self,
         model: &str,
@@ -96,11 +107,16 @@ impl ChunkCache {
             created_at_epoch,
         };
         let json = serde_json::to_string_pretty(&entry)?;
+        // Write the entry to disk, overwriting any existing file at this path.
         fs::write(&path, json)
             .with_context(|| format!("failed to write cache file: {}", path.display()))?;
         Ok(())
     }
 
+    /// Generates the unique file path for a given set of inputs.
+    ///
+    /// The path is derived from a composite hash of all inputs to ensure
+    /// that the cache key is deterministic and unique to the input combination.
     fn path_for(
         &self,
         model: &str,
