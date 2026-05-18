@@ -19,7 +19,9 @@ pub fn validate_generated_chunk(generated: &str, original: &str) -> Result<()> {
     }
 
     if generated.contains("```") {
-        return Err(anyhow!("model returned Markdown fences instead of raw Rust code"));
+        return Err(anyhow!(
+            "model returned Markdown fences instead of raw Rust code"
+        ));
     }
 
     let generated_chars = generated.chars().count();
