@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "started_at": "2026-05-18T04:35:45.279434900Z",
+  "finished_at": "2026-05-18T04:39:23.393884700Z",
+  "duration_seconds": 218.12094,
+  "file": "src\\main.rs",
+  "model": "gemma4:e4b",
+  "mode": "rewrite",
+  "chunks_total": 4,
+  "chunks_ok": 4,
+  "chunks_failed": 0,
+  "chunks": [
+    {
+      "index": 1,
+      "kind": "mixed_semantic_block",
+      "start_line": 1,
+      "end_line": 150,
+      "status": "ok",
+      "duration_seconds": 71.80377,
+      "error": null
+    },
+    {
+      "index": 2,
+      "kind": "mixed_semantic_block",
+      "start_line": 152,
+      "end_line": 210,
+      "status": "ok",
+      "duration_seconds": 28.614975,
+      "error": null
+    },
+    {
+      "index": 3,
+      "kind": "module_gap",
+      "start_line": 210,
+      "end_line": 437,
+      "status": "ok",
+      "duration_seconds": 102.59706,
+      "error": null
+    },
+    {
+      "index": 4,
+      "kind": "function",
+      "start_line": 437,
+      "end_line": 479,
+      "status": "ok",
+      "duration_seconds": 14.987272,
+      "error": null
+    }
+  ]
+}
