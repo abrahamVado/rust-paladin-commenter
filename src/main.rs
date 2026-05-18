@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -19,7 +19,7 @@ use crate::cache::ChunkCache;
 use crate::chunker::{chunk_rust_source, ChunkConfig};
 use crate::ollama::OllamaClient;
 use crate::prompt::{build_analysis_prompt, build_commenting_prompt, PromptProfile};
-use crate::report::AnalysisItem;
+use crate::report::{format_analysis_report, AnalysisItem};
 use crate::rewrite::{build_rewritten_source, rustfmt_file_if_available, validate_generated_chunk};
 use crate::runlog::{ChunkRunStatus, RunLog};
 
@@ -360,7 +360,7 @@ fn main() -> Result<()> {
 
     match cli.mode {
         Mode::Analyze => {
-            let analysis_output = format_analysis_output(&cli.file, &report_items);
+            let analysis_output = format_analysis_report(&cli.file, &report_items);
             fs::write(&cli.output, analysis_output)
                 .with_context(|| format!("failed to write analysis output: {}", cli.output.display()))?;
             info!(path = %cli.output.display(), "Analysis written");
@@ -391,27 +391,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn format_analysis_output(input_file: &Path, items: &[AnalysisItem]) -> String {
-    let mut output = String::new();
-    output.push_str(&format!("Input file: {}\n", input_file.display()));
-    output.push_str(&format!("Total processed chunks: {}\n\n", items.len()));
-
-    for item in items {
-        output.push_str(&format!(
-            "Chunk #{:03} [{}] lines {}-{}\n",
-            item.index, item.kind, item.start_line, item.end_line
-        ));
-        output.push_str("Source preview:\n");
-        output.push_str(&item.source_preview);
-        output.push_str("\n\nModel response:\n");
-        output.push_str(&item.model_response);
-        output.push_str("\n\n");
-    }
-
-    output
-}
-
-fn prompt_apply_changes(path: &Path) -> Result<bool> {
+fn prompt_apply_changes(path: &std::path::Path) -> Result<bool> {
     print!("Apply generated comments to {}? [y/N]: ", path.display());
     io::stdout().flush().context("failed to flush prompt")?;
 
