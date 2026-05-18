@@ -2,7 +2,7 @@
 
 [![Build](https://img.shields.io/badge/build-cargo%20test-brightgreen)](#build)
 
-A context-aware Rust CLI that chunks code by syntax boundaries, sends chunks to a local Ollama/Gemma model, and can generate analysis reports or safely rewrite a commented copy of the source file.
+A context-aware Rust CLI that chunks code by syntax boundaries, sends chunks to a local Ollama/Gemma model, and can add comments directly into the source file after an explicit confirmation step.
 
 ## Why this exists
 
@@ -31,7 +31,6 @@ If a block is too large, it recursively descends into smaller AST nodes instead 
 - **Four prompt profiles**: explain, maintainer-comments, security, architecture
 - **Chunk response cache** with optional TTL (`--cache-ttl`)
 - **Structured logging** via `tracing` with `--log-level` and `--quiet`
-- **Progress bar** (`--progress`) for long-running jobs
 - Retry handling with configurable max retries
 - Request timeout per chunk
 - Machine-readable JSON run log (versioned schema)
@@ -64,41 +63,31 @@ cargo run -- \
   --file src/main.rs \
   --mode analyze \
   --model gemma4:e4b \
-  --output paladin-analysis.md
+  --output paladin-analysis.txt
 ```
 
-### Create a safely commented copy
+### Comment a file and decide at the end whether to apply changes
 
 ```bash
 cargo run -- \
   --file src/main.rs \
-  --mode rewrite \
-  --model gemma4:e4b \
-  --output src/main.commented.rs
+  --mode comment \
+  --model gemma4:e4b
 ```
 
-The original file is **never** modified.
+When processing finishes, the CLI asks whether you want to apply the generated comments to the original file.
 
 ### Use cache with TTL
 
 ```bash
 cargo run -- \
   --file src/main.rs \
-  --mode rewrite \
+  --mode comment \
   --cache \
-  --cache-ttl 86400   # 24 hours; 0 = unlimited
+  --cache-ttl 86400
 ```
 
 Cache files are stored in `.paladin-cache/`.
-
-### Show a progress bar
-
-```bash
-cargo run -- \
-  --file src/main.rs \
-  --mode analyze \
-  --progress
-```
 
 ### Control log verbosity
 
@@ -115,7 +104,7 @@ cargo run -- --file src/main.rs --mode analyze --quiet
 ```bash
 cargo run -- \
   --file src/main.rs \
-  --mode rewrite \
+  --mode comment \
   --from-chunk 8
 ```
 
