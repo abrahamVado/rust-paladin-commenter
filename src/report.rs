@@ -2,16 +2,20 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
+use crate::chunk_kind::ChunkKind;
+
+/// A single chunk analysis result ready for report output.
 #[derive(Debug, Clone)]
 pub struct AnalysisItem {
     pub index: usize,
-    pub kind: String,
+    pub kind: ChunkKind,
     pub start_line: usize,
     pub end_line: usize,
     pub source_preview: String,
     pub model_response: String,
 }
 
+/// Write a Markdown report summarising all processed chunks and their model responses.
 pub fn write_markdown_report(output: &Path, input_file: &Path, items: &[AnalysisItem]) -> Result<()> {
     let mut markdown = String::new();
 

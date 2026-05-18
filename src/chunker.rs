@@ -1,20 +1,31 @@
 use anyhow::{anyhow, Context, Result};
 use tree_sitter::{Node, Parser};
 
+use crate::chunk_kind::ChunkKind;
+
+/// Configuration controlling how source code is split into semantic chunks.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkConfig {
+    /// Hard upper limit on characters per chunk.
     pub max_chars: usize,
+    /// Soft target — adjacent chunks smaller than this are merged together.
     pub target_chars: usize,
 }
 
+/// A single semantic code chunk extracted from a Rust source file.
 #[derive(Debug, Clone)]
 pub struct CodeChunk {
+    /// 1-based index within the chunked file.
     pub index: usize,
-    pub kind: String,
+    /// Semantic kind (function, struct, impl, gap, etc.).
+    pub kind: crate::chunk_kind::ChunkKind,
     pub start_byte: usize,
     pub end_byte: usize,
+    /// 1-based source line where the chunk starts.
     pub start_line: usize,
+    /// 1-based source line where the chunk ends.
     pub end_line: usize,
+    /// Full text of the chunk.
     pub text: String,
 }
 
@@ -30,13 +41,18 @@ impl CodeChunk {
 
 #[derive(Debug, Clone)]
 struct CandidateChunk {
-    kind: String,
+    kind: crate::chunk_kind::ChunkKind,
     start_byte: usize,
     end_byte: usize,
     start_line: usize,
     end_line: usize,
 }
 
+/// Parse a Rust source string and split it into semantic chunks respecting AST boundaries.
+///
+/// Uses tree-sitter to identify top-level items (functions, structs, impls, …),
+/// inserts gap chunks for inter-item code, and merges small neighbours up to
+/// `config.target_chars`.
 pub fn chunk_rust_source(source: &str, config: ChunkConfig) -> Result<Vec<CodeChunk>> {
     if config.max_chars < 1000 {
         return Err(anyhow!("max_chars should be at least 1000"));
@@ -135,7 +151,7 @@ fn is_semantic_boundary(kind: &str) -> bool {
 impl CandidateChunk {
     fn from_node(node: Node, fallback_kind: &str) -> Self {
         Self {
-            kind: fallback_kind.to_string(),
+            kind: ChunkKind::from(fallback_kind),
             start_byte: node.start_byte(),
             end_byte: node.end_byte(),
             start_line: node.start_position().row + 1,
@@ -195,7 +211,7 @@ fn include_gaps_as_chunks(source: &str, chunks: Vec<CandidateChunk>) -> Vec<Cand
 
 fn gap_chunk(source: &str, start_byte: usize, end_byte: usize) -> CandidateChunk {
     CandidateChunk {
-        kind: "module_gap".to_string(),
+        kind: ChunkKind::Gap,
         start_byte,
         end_byte,
         start_line: byte_to_line(source, start_byte),
@@ -223,8 +239,8 @@ fn merge_small_neighbors(
                 let existing_chars = existing.char_len(source);
                 let next_chars = next.char_len(source);
 
-                let should_merge = existing.kind == "module_gap"
-                    || next.kind == "module_gap"
+                let should_merge = existing.kind == ChunkKind::Gap
+                    || next.kind == ChunkKind::Gap
                     || (existing_chars < config.target_chars
                         && next_chars < config.target_chars
                         && combined_chars <= config.max_chars);
@@ -249,14 +265,15 @@ fn merge_small_neighbors(
     result
 }
 
-fn merge_kind(a: &str, b: &str) -> String {
+fn merge_kind(a: &crate::chunk_kind::ChunkKind, b: &crate::chunk_kind::ChunkKind) -> crate::chunk_kind::ChunkKind {
+    use crate::chunk_kind::ChunkKind::*;
     if a == b {
-        a.to_string()
-    } else if a == "module_gap" {
-        b.to_string()
-    } else if b == "module_gap" {
-        a.to_string()
+        a.clone()
+    } else if matches!(a, Gap) {
+        b.clone()
+    } else if matches!(b, Gap) {
+        a.clone()
     } else {
-        "mixed_semantic_block".to_string()
+        Mixed
     }
 }

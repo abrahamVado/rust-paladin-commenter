@@ -1,4 +1,5 @@
 mod cache;
+mod chunk_kind;
 mod chunker;
 mod ollama;
 mod prompt;
@@ -8,9 +9,11 @@ mod runlog;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tracing::{debug, error, info, warn};
 
 use crate::cache::ChunkCache;
 use crate::chunker::{chunk_rust_source, ChunkConfig};
@@ -19,6 +22,10 @@ use crate::prompt::{build_analysis_prompt, build_commenting_prompt, PromptProfil
 use crate::report::{write_markdown_report, AnalysisItem};
 use crate::rewrite::{build_rewritten_source, rustfmt_file_if_available, validate_generated_chunk};
 use crate::runlog::{ChunkRunStatus, RunLog};
+
+// ---------------------------------------------------------------------------
+// CLI types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
 enum Mode {
@@ -30,8 +37,18 @@ enum Mode {
     Rewrite,
 }
 
+/// Structured log level selectable from the CLI.
+#[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
 #[derive(Debug, Parser)]
-#[command(name = "paladin-commenter")]
+#[command(name = "paladin-commenter", version)]
 #[command(about = "Context-aware Rust file chunker that sends semantic chunks to a local Ollama/Gemma model")]
 struct Cli {
     /// Rust source file to process.
@@ -78,6 +95,11 @@ struct Cli {
     #[arg(long, default_value = ".paladin-cache")]
     cache_dir: PathBuf,
 
+    /// Cache time-to-live in seconds. Entries older than this are treated as misses.
+    /// Set to 0 to disable TTL (keep entries forever).
+    #[arg(long, default_value_t = 0)]
+    cache_ttl: u64,
+
     /// Start processing at this chunk index, 1-based.
     #[arg(long)]
     from_chunk: Option<usize>,
@@ -94,7 +116,7 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     max_retries: usize,
 
-    /// HTTP timeout per chunk request.
+    /// HTTP timeout per chunk request in seconds.
     #[arg(long, default_value_t = 240)]
     chunk_timeout_seconds: u64,
 
@@ -112,12 +134,96 @@ struct Cli {
 
     /// Skip the Ollama model availability check.
     #[arg(long)]
-    no_health_check: bool,
+    skip_health_check: bool,
+
+    /// Logging verbosity.
+    #[arg(long, value_enum, default_value_t = LogLevel::Info)]
+    log_level: LogLevel,
+
+    /// Suppress all output except errors (shorthand for --log-level error).
+    #[arg(long)]
+    quiet: bool,
+
+    /// Show a progress bar during chunk processing.
+    #[arg(long)]
+    progress: bool,
 }
+
+impl Cli {
+    /// Validate CLI arguments before heavy work begins.
+    fn validate(&self) -> Result<()> {
+        if self.max_chars < 1000 {
+            anyhow::bail!("--max-chars must be at least 1000 (got {})", self.max_chars);
+        }
+        if self.target_chars > self.max_chars {
+            anyhow::bail!(
+                "--target-chars ({}) cannot exceed --max-chars ({})",
+                self.target_chars,
+                self.max_chars
+            );
+        }
+        Ok(())
+    }
+
+    fn mode_string(&self) -> String {
+        match self.mode {
+            Mode::Analyze => "analyze".to_string(),
+            Mode::Comment => "comment".to_string(),
+            Mode::Rewrite => "rewrite".to_string(),
+        }
+    }
+
+    fn effective_log_level(&self) -> tracing::Level {
+        if self.quiet {
+            return tracing::Level::ERROR;
+        }
+        match self.log_level {
+            LogLevel::Error => tracing::Level::ERROR,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Trace => tracing::Level::TRACE,
+        }
+    }
+
+    fn cache_ttl_duration(&self) -> Option<Duration> {
+        if self.cache_ttl == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(self.cache_ttl))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Logging setup
+// ---------------------------------------------------------------------------
+
+fn setup_logging(level: tracing::Level) {
+    use tracing_subscriber::fmt;
+    let builder = fmt::Subscriber::builder()
+        .with_max_level(level)
+        .with_target(false)
+        .with_ansi(true);
+    tracing::subscriber::set_global_default(builder.finish())
+        .expect("failed to set tracing subscriber");
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Set up structured logging first so that validation errors are visible.
+    setup_logging(cli.effective_log_level());
+
+    cli.validate()?;
+
     let started = Instant::now();
+
+    info!(file = %cli.file.display(), model = %cli.model, mode = %cli.mode_string(), "Starting paladin-commenter");
 
     let source = fs::read_to_string(&cli.file)
         .with_context(|| format!("failed to read file: {}", cli.file.display()))?;
@@ -129,27 +235,37 @@ fn main() -> Result<()> {
 
     let chunks = chunk_rust_source(&source, config).context("failed to chunk Rust source")?;
 
-    println!("File: {}", cli.file.display());
-    println!("Chunks: {}", chunks.len());
+    info!(chunks = chunks.len(), "File chunked successfully");
 
     for chunk in &chunks {
-        println!(
-            "- #{:03} {:>20} lines {}-{} chars={} bytes={}..{}",
-            chunk.index,
-            chunk.kind,
-            chunk.start_line,
-            chunk.end_line,
-            chunk.text.chars().count(),
-            chunk.start_byte,
-            chunk.end_byte
+        debug!(
+            index = chunk.index,
+            kind = %chunk.kind,
+            lines = format!("{}-{}", chunk.start_line, chunk.end_line),
+            chars = chunk.text.chars().count(),
+            "Chunk boundary"
         );
     }
 
     if cli.dry_run {
-        println!("Dry run enabled. Ollama was not called.");
+        // In dry-run, always print chunk list to stdout regardless of log level
+        for chunk in &chunks {
+            println!(
+                "  #{:03} {:>20} lines {}-{} chars={} bytes={}..{}",
+                chunk.index,
+                chunk.kind,
+                chunk.start_line,
+                chunk.end_line,
+                chunk.text.chars().count(),
+                chunk.start_byte,
+                chunk.end_byte
+            );
+        }
+        info!("Dry run enabled — Ollama was not called.");
         return Ok(());
     }
 
+    // ----- Ollama client -----
     let client = OllamaClient::new(
         cli.ollama_url.clone(),
         cli.model.clone(),
@@ -157,7 +273,7 @@ fn main() -> Result<()> {
         cli.num_ctx,
     );
 
-    if !cli.no_health_check {
+    if !cli.skip_health_check {
         let models = client.list_models().context("Ollama health check failed")?;
         if !models.iter().any(|m| m == &cli.model) {
             anyhow::bail!(
@@ -166,27 +282,46 @@ fn main() -> Result<()> {
                 models.join(", ")
             );
         }
-        println!("Ollama reachable. Model '{}' found.", cli.model);
+        info!(model = %cli.model, "Ollama reachable — model found");
     }
 
+    // ----- Cache -----
     let cache = if cli.cache {
-        Some(ChunkCache::new(cli.cache_dir.clone())?)
+        Some(ChunkCache::new(cli.cache_dir.clone(), cli.cache_ttl_duration())?)
     } else {
         None
     };
 
+    // ----- Processing loop -----
     let mut run_log = RunLog::new(&cli.file, &cli.model, &cli.mode_string(), chunks.len());
     let mut report_items = Vec::new();
     let mut replacements = Vec::new();
 
+    // Optional progress bar
+    let pb = if cli.progress {
+        let bar = ProgressBar::new(chunks.len() as u64);
+        bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} chunks ({eta} remaining)")
+                .expect("invalid progress bar template")
+                .progress_chars("█▓░"),
+        );
+        Some(bar)
+    } else {
+        None
+    };
+
     for chunk in chunks.iter() {
+        // Chunk filtering
         if let Some(only) = cli.only_chunk {
             if chunk.index != only {
+                if let Some(ref pb) = pb { pb.inc(1); }
                 continue;
             }
         }
         if let Some(from) = cli.from_chunk {
             if chunk.index < from {
+                if let Some(ref pb) = pb { pb.inc(1); }
                 continue;
             }
         }
@@ -197,13 +332,12 @@ fn main() -> Result<()> {
         };
 
         let chunk_started = Instant::now();
-        println!(
-            "[{}/{}] Processing {} lines {}-{}...",
-            chunk.index,
-            chunks.len(),
-            chunk.kind,
-            chunk.start_line,
-            chunk.end_line
+        info!(
+            chunk = chunk.index,
+            total = chunks.len(),
+            kind = %chunk.kind,
+            lines = format!("{}-{}", chunk.start_line, chunk.end_line),
+            "Processing chunk"
         );
 
         let response_result = get_or_generate(
@@ -225,7 +359,8 @@ fn main() -> Result<()> {
                         let msg = format!("generated chunk failed validation: {err}");
                         run_log.push_chunk(ChunkRunStatus::failed(chunk, &msg, chunk_started.elapsed()));
                         if cli.skip_failed {
-                            eprintln!("Chunk #{} failed validation. Keeping original chunk.", chunk.index);
+                            warn!(chunk = chunk.index, error = %msg, "Keeping original chunk");
+                            if let Some(ref pb) = pb { pb.inc(1); }
                             continue;
                         }
                         anyhow::bail!("chunk #{}: {}", chunk.index, msg);
@@ -243,12 +378,16 @@ fn main() -> Result<()> {
                 });
 
                 run_log.push_chunk(ChunkRunStatus::ok(chunk, chunk_started.elapsed()));
-                println!("Chunk #{} ok in {:.1}s", chunk.index, chunk_started.elapsed().as_secs_f32());
+                info!(
+                    chunk = chunk.index,
+                    elapsed_s = format!("{:.1}", chunk_started.elapsed().as_secs_f32()),
+                    "Chunk OK"
+                );
             }
             Err(err) => {
                 let msg = err.to_string();
                 run_log.push_chunk(ChunkRunStatus::failed(chunk, &msg, chunk_started.elapsed()));
-                eprintln!("Chunk #{} failed: {}", chunk.index, msg);
+                error!(chunk = chunk.index, error = %msg, "Chunk failed");
                 if !cli.skip_failed {
                     run_log.finish(started.elapsed());
                     run_log.write(&cli.run_log)?;
@@ -256,13 +395,18 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        if let Some(ref pb) = pb { pb.inc(1); }
     }
 
+    if let Some(ref pb) = pb { pb.finish_with_message("Done"); }
+
+    // ----- Output -----
     match cli.mode {
         Mode::Analyze | Mode::Comment => {
             write_markdown_report(&cli.output, &cli.file, &report_items)
                 .with_context(|| format!("failed to write report: {}", cli.output.display()))?;
-            println!("Report written to {}", cli.output.display());
+            info!(path = %cli.output.display(), "Report written");
         }
         Mode::Rewrite => {
             let rewritten = build_rewritten_source(&source, &replacements);
@@ -271,16 +415,24 @@ fn main() -> Result<()> {
             if cli.rustfmt {
                 rustfmt_file_if_available(&cli.output);
             }
-            println!("Rewritten file written to {}", cli.output.display());
+            info!(path = %cli.output.display(), "Rewritten file written");
         }
     }
 
     run_log.finish(started.elapsed());
     run_log.write(&cli.run_log)?;
-    println!("Run log written to {}", cli.run_log.display());
+    info!(
+        path = %cli.run_log.display(),
+        elapsed_s = format!("{:.1}", started.elapsed().as_secs_f32()),
+        "Run log written"
+    );
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Cache-aware generation with retries
+// ---------------------------------------------------------------------------
 
 fn get_or_generate(
     client: &OllamaClient,
@@ -294,7 +446,7 @@ fn get_or_generate(
 ) -> Result<String> {
     if let Some(cache) = cache {
         if let Some(hit) = cache.get(model, mode, chunk_index, chunk_text, prompt)? {
-            println!("Chunk #{} loaded from cache", chunk_index);
+            info!(chunk = chunk_index, "Loaded from cache");
             return Ok(hit);
         }
     }
@@ -302,7 +454,12 @@ fn get_or_generate(
     let mut last_err = None;
     for attempt in 0..=max_retries {
         if attempt > 0 {
-            println!("Retrying chunk #{} attempt {}/{}", chunk_index, attempt + 1, max_retries + 1);
+            warn!(
+                chunk = chunk_index,
+                attempt = attempt + 1,
+                max_attempts = max_retries + 1,
+                "Retrying chunk"
+            );
         }
 
         match client.generate(prompt) {
@@ -319,18 +476,4 @@ fn get_or_generate(
     }
 
     Err(last_err.expect("at least one attempt should run"))
-}
-
-trait ModeExt {
-    fn mode_string(&self) -> String;
-}
-
-impl ModeExt for Cli {
-    fn mode_string(&self) -> String {
-        match self.mode {
-            Mode::Analyze => "analyze".to_string(),
-            Mode::Comment => "comment".to_string(),
-            Mode::Rewrite => "rewrite".to_string(),
-        }
-    }
 }

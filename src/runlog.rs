@@ -5,10 +5,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::chunk_kind::ChunkKind;
 use crate::chunker::CodeChunk;
 
+/// Top-level JSON run log capturing timing, success/failure counts, and per-chunk status.
 #[derive(Debug, Serialize)]
 pub struct RunLog {
+    version: u8,
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
     duration_seconds: Option<f32>,
@@ -21,6 +24,7 @@ pub struct RunLog {
     chunks: Vec<ChunkRunStatus>,
 }
 
+/// Per-chunk outcome persisted in the run log.
 #[derive(Debug, Serialize)]
 pub struct ChunkRunStatus {
     index: usize,
@@ -35,6 +39,7 @@ pub struct ChunkRunStatus {
 impl RunLog {
     pub fn new(file: &Path, model: &str, mode: &str, chunks_total: usize) -> Self {
         Self {
+            version: 1,
             started_at: Utc::now(),
             finished_at: None,
             duration_seconds: None,
@@ -74,7 +79,7 @@ impl ChunkRunStatus {
     pub fn ok(chunk: &CodeChunk, duration: Duration) -> Self {
         Self {
             index: chunk.index,
-            kind: chunk.kind.clone(),
+            kind: chunk.kind.to_string(),
             start_line: chunk.start_line,
             end_line: chunk.end_line,
             status: "ok".to_string(),
@@ -86,7 +91,7 @@ impl ChunkRunStatus {
     pub fn failed(chunk: &CodeChunk, error: &str, duration: Duration) -> Self {
         Self {
             index: chunk.index,
-            kind: chunk.kind.clone(),
+            kind: chunk.kind.to_string(),
             start_line: chunk.start_line,
             end_line: chunk.end_line,
             status: "failed".to_string(),

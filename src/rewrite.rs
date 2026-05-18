@@ -1,10 +1,18 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 use std::process::Command;
+use tracing::{info, warn};
 use tree_sitter::Parser;
 
 use crate::chunker::CodeChunk;
 
+/// Validate that a model-generated chunk is safe to substitute for the original.
+///
+/// Checks for:
+/// - Empty output
+/// - Markdown fences (the model was asked to return raw code)
+/// - Output that is suspiciously larger than the original (>3×)
+/// - Rust parse errors according to tree-sitter
 pub fn validate_generated_chunk(generated: &str, original: &str) -> Result<()> {
     if generated.trim().is_empty() {
         return Err(anyhow!("model returned an empty chunk"));
@@ -38,6 +46,8 @@ pub fn validate_generated_chunk(generated: &str, original: &str) -> Result<()> {
     Ok(())
 }
 
+/// Build the final source by splicing model-generated replacements into the
+/// original source at matching byte ranges.
 pub fn build_rewritten_source(source: &str, replacements: &[(CodeChunk, String)]) -> String {
     let mut sorted = replacements.to_vec();
     sorted.sort_by_key(|(chunk, _)| chunk.start_byte);
@@ -61,11 +71,12 @@ pub fn build_rewritten_source(source: &str, replacements: &[(CodeChunk, String)]
     output
 }
 
+/// Run `rustfmt` on the given file if the binary is available on `$PATH`.
 pub fn rustfmt_file_if_available(path: &Path) {
     let status = Command::new("rustfmt").arg(path).status();
     match status {
-        Ok(status) if status.success() => println!("rustfmt applied to {}", path.display()),
-        Ok(status) => eprintln!("rustfmt exited with status {} for {}", status, path.display()),
-        Err(_) => eprintln!("rustfmt not available. Skipping formatting."),
+        Ok(s) if s.success() => info!(path = %path.display(), "rustfmt applied"),
+        Ok(s) => warn!(path = %path.display(), code = %s, "rustfmt exited with non-zero status"),
+        Err(_) => warn!("rustfmt not available — skipping formatting"),
     }
 }

@@ -1,5 +1,7 @@
 # Paladin Commenter v2
 
+[![Build](https://img.shields.io/badge/build-cargo%20test-brightgreen)](#build)
+
 A context-aware Rust CLI that chunks code by syntax boundaries, sends chunks to a local Ollama/Gemma model, and can generate analysis reports or safely rewrite a commented copy of the source file.
 
 ## Why this exists
@@ -21,18 +23,21 @@ If a block is too large, it recursively descends into smaller AST nodes instead 
 
 ## Features
 
-- AST-based chunking for Rust
-- Ollama `/api/generate` integration
-- model health check through `/api/tags`
-- dry-run mode to inspect chunks
-- analysis report mode
-- safe rewrite mode that writes a new file instead of overwriting the original
-- chunk cache to avoid re-running slow local model calls
-- retry handling
-- request timeout per chunk
-- run log JSON
-- chunk range controls such as `--from-chunk`, `--only-chunk`, and `--skip-failed`
-- optional `rustfmt` after rewrite
+- **AST-based chunking** for Rust using tree-sitter
+- **Ollama `/api/generate`** integration with configurable model
+- Model health check through `/api/tags`
+- Dry-run mode to inspect chunks without calling Ollama
+- **Three processing modes**: analyze, comment, rewrite
+- **Four prompt profiles**: explain, maintainer-comments, security, architecture
+- **Chunk response cache** with optional TTL (`--cache-ttl`)
+- **Structured logging** via `tracing` with `--log-level` and `--quiet`
+- **Progress bar** (`--progress`) for long-running jobs
+- Retry handling with configurable max retries
+- Request timeout per chunk
+- Machine-readable JSON run log (versioned schema)
+- Chunk range controls: `--from-chunk`, `--only-chunk`, `--skip-failed`
+- Optional `rustfmt` after rewrite
+- **Type-safe chunk kinds** via `ChunkKind` enum
 
 ## Build
 
@@ -40,7 +45,9 @@ If a block is too large, it recursively descends into smaller AST nodes instead 
 cargo build --release
 ```
 
-## Check chunking only
+## Quick start
+
+### Check chunking only (no Ollama required)
 
 ```bash
 cargo run -- \
@@ -50,7 +57,7 @@ cargo run -- \
   --target-chars 2500
 ```
 
-## Analyze a file
+### Analyze a file
 
 ```bash
 cargo run -- \
@@ -60,7 +67,7 @@ cargo run -- \
   --output paladin-analysis.md
 ```
 
-## Create a safely commented copy
+### Create a safely commented copy
 
 ```bash
 cargo run -- \
@@ -70,20 +77,40 @@ cargo run -- \
   --output src/main.commented.rs
 ```
 
-The original file is not modified.
+The original file is **never** modified.
 
-## Use cache
+### Use cache with TTL
 
 ```bash
 cargo run -- \
   --file src/main.rs \
   --mode rewrite \
-  --cache
+  --cache \
+  --cache-ttl 86400   # 24 hours; 0 = unlimited
 ```
 
 Cache files are stored in `.paladin-cache/`.
 
-## Resume after a failed chunk
+### Show a progress bar
+
+```bash
+cargo run -- \
+  --file src/main.rs \
+  --mode analyze \
+  --progress
+```
+
+### Control log verbosity
+
+```bash
+# Debug output
+cargo run -- --file src/main.rs --dry-run --log-level debug
+
+# Silence everything except errors
+cargo run -- --file src/main.rs --mode analyze --quiet
+```
+
+### Resume after a failed chunk
 
 ```bash
 cargo run -- \
@@ -92,7 +119,7 @@ cargo run -- \
   --from-chunk 8
 ```
 
-## Process one problematic chunk
+### Process one problematic chunk
 
 ```bash
 cargo run -- \
@@ -107,6 +134,14 @@ cargo run -- \
 --max-chars 4000 --target-chars 2500 --chunk-timeout-seconds 180 --max-retries 1
 ```
 
+## Running tests
+
+```bash
+cargo test
+```
+
 ## Notes
 
-For local models, prefer smaller chunk sizes. A chunk that is too big can make the model loop, hallucinate, or return malformed code.
+- For local models, prefer smaller chunk sizes. A chunk that is too big can make the model loop, hallucinate, or return malformed code.
+- The `--skip-health-check` flag lets you run without verifying Ollama connectivity first.
+- The JSON run log now includes a `version` field for forward compatibility.
