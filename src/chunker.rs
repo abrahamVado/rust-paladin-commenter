@@ -265,7 +265,10 @@ fn merge_small_neighbors(
     result
 }
 
-fn merge_kind(a: &crate::chunk_kind::ChunkKind, b: &crate::chunk_kind::ChunkKind) -> crate::chunk_kind::ChunkKind {
+fn merge_kind(
+    a: &crate::chunk_kind::ChunkKind,
+    b: &crate::chunk_kind::ChunkKind,
+) -> crate::chunk_kind::ChunkKind {
     use crate::chunk_kind::ChunkKind::*;
     if a == b {
         a.clone()

@@ -119,7 +119,8 @@ impl ChunkCache {
         ));
         // Truncate hash to first 16 hex chars for shorter filenames
         let short_key = &key[..16.min(key.len())];
-        self.dir.join(format!("chunk-{:03}-{}.json", chunk_index, short_key))
+        self.dir
+            .join(format!("chunk-{:03}-{}.json", chunk_index, short_key))
     }
 }
 

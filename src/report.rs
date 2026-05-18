@@ -16,7 +16,11 @@ pub struct AnalysisItem {
 }
 
 /// Write a Markdown report summarising all processed chunks and their model responses.
-pub fn write_markdown_report(output: &Path, input_file: &Path, items: &[AnalysisItem]) -> Result<()> {
+pub fn write_markdown_report(
+    output: &Path,
+    input_file: &Path,
+    items: &[AnalysisItem],
+) -> Result<()> {
     let mut markdown = String::new();
 
     markdown.push_str("# Paladin Code Analysis Report\n\n");
@@ -39,8 +43,7 @@ pub fn write_markdown_report(output: &Path, input_file: &Path, items: &[Analysis
         markdown.push_str("\n\n---\n\n");
     }
 
-    fs::write(output, markdown)
-        .with_context(|| format!("failed to write {}", output.display()))?;
+    fs::write(output, markdown).with_context(|| format!("failed to write {}", output.display()))?;
 
     Ok(())
 }
