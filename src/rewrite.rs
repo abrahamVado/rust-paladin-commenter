@@ -6,6 +6,40 @@ use tree_sitter::Parser;
 
 use crate::chunker::CodeChunk;
 
+/// Normalize common LLM formatting mistakes before validation.
+///
+/// Today this mainly strips a single outer Markdown code fence such as
+/// ```rust ... ``` when the model otherwise returned valid Rust code.
+pub fn normalize_generated_chunk(generated: &str) -> String {
+    let trimmed = generated.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed.to_string();
+    }
+
+    let mut lines = trimmed.lines();
+    let Some(first_line) = lines.next() else {
+        return trimmed.to_string();
+    };
+
+    if !first_line.trim_start().starts_with("```") {
+        return trimmed.to_string();
+    }
+
+    let remaining: Vec<&str> = lines.collect();
+    let Some(last_line) = remaining.last() else {
+        return trimmed.to_string();
+    };
+
+    if !last_line.trim().starts_with("```") {
+        return trimmed.to_string();
+    }
+
+    remaining[..remaining.len().saturating_sub(1)]
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Validate that a model-generated chunk is safe to substitute for the original.
 ///
 /// Checks for:
@@ -80,5 +114,28 @@ pub fn rustfmt_file_if_available(path: &Path) {
         Ok(s) if s.success() => info!(path = %path.display(), "rustfmt applied"),
         Ok(s) => warn!(path = %path.display(), code = %s, "rustfmt exited with non-zero status"),
         Err(_) => warn!("rustfmt not available — skipping formatting"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_generated_chunk;
+
+    #[test]
+    fn strips_rust_fences() {
+        let input = "```rust\nfn demo() {}\n```";
+        assert_eq!(normalize_generated_chunk(input), "fn demo() {}");
+    }
+
+    #[test]
+    fn strips_plain_fences() {
+        let input = "```\nfn demo() {}\n```";
+        assert_eq!(normalize_generated_chunk(input), "fn demo() {}");
+    }
+
+    #[test]
+    fn leaves_unfenced_code_alone() {
+        let input = "fn demo() {}";
+        assert_eq!(normalize_generated_chunk(input), "fn demo() {}");
     }
 }

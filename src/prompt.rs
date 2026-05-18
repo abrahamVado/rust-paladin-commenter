@@ -64,13 +64,15 @@ Rules:
 - Preserve the original behavior exactly.
 - Preserve function names, types, visibility, attributes, derives, and signatures.
 - Add concise comments only where they improve understanding.
+- Keep existing comments that are already clear and useful.
+- Improve existing comments when they are vague, outdated, redundant, or missing important context.
 - Prefer Rust doc comments `///` for public functions, structs, enums, traits, and methods.
 - Use inline `//` comments only for non-obvious logic.
 - Comment architecture, business rules, side effects, I/O, security-sensitive logic, parsing, retries, cache behavior, and failure modes.
 - Do not over-comment obvious code.
 - Do not wrap the result in Markdown fences.
 - Do not explain your changes outside the code.
-- Do not remove existing comments.
+- Do not remove good existing comments.
 - Do not add TODOs unless the original code already implies incomplete behavior.
 
 Chunk metadata:
